@@ -241,3 +241,64 @@ export function postResponseScan(req: ResponseScanRequest): boolean {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Image scan
+// ---------------------------------------------------------------------------
+
+/**
+ * POST an image attached to a prompt to /api/guardrails/ide/validate-image,
+ * where Tower's Presidio image redactor looks for sensitive text in it and
+ * records the violation. Returns null on any failure (no token, older server,
+ * redactor down), so the caller can treat the image as unscanned.
+ */
+export function validateImageViaAPI(
+  base64: string,
+  meta: { fileName?: string; ideConversationId?: string; ideGenerationId?: string },
+): { passed: boolean } | null {
+  const token = getToken();
+  if (!token) return null;
+
+  const url = `${API_BASE}/api/guardrails/ide/validate-image`;
+  const body = JSON.stringify({
+    image: base64,
+    fileName: meta.fileName?.slice(0, 255),
+    ideConversationId: meta.ideConversationId?.slice(0, 100),
+    ideGenerationId: meta.ideGenerationId?.slice(0, 100),
+  });
+  const startMs = performance.now();
+
+  try {
+    const result = execFileSync(
+      'curl',
+      [
+        '-fsSL',
+        '-X',
+        'POST',
+        '-H',
+        `Authorization: Bearer ${token}`,
+        '-H',
+        'Content-Type: application/json',
+        '--data-binary',
+        '@-',
+        url,
+      ],
+      // Image OCR is slower than a text scan; beforeSubmitPrompt allows 30s.
+      {
+        input: body,
+        timeout: 20000,
+        encoding: 'utf-8' as BufferEncoding,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 1_000_000,
+      },
+    );
+    const parsed = JSON.parse(result as string) as { passed?: boolean };
+    debug(`API: image scan ${(performance.now() - startMs).toFixed(0)}ms | passed=${parsed.passed}`);
+    return typeof parsed.passed === 'boolean' ? { passed: parsed.passed } : null;
+  } catch (err: unknown) {
+    debug(
+      `API: image scan FAILED after ${(performance.now() - startMs).toFixed(0)}ms | ${(err as Error).message?.slice(0, 150)}`,
+    );
+    return null;
+  }
+}

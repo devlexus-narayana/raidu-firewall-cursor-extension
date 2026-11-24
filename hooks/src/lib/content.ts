@@ -51,3 +51,27 @@ export function isBinary(data: Buffer): boolean {
 export function isScannableText(text: string): boolean {
   return !text.slice(0, 8192).includes('\u0000') && !text.startsWith('%PDF');
 }
+
+/** Image formats the Tower image redactor (Presidio, via PIL) reads. */
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff']);
+/** Tower's IdeValidateImageDto takes ~10MB of image. */
+export const MAX_IMAGE_BYTES = 10_000_000;
+
+export function isImagePath(filePath: string): boolean {
+  const dot = filePath.lastIndexOf('.');
+  return dot >= 0 && IMAGE_EXTENSIONS.has(filePath.slice(dot).toLowerCase());
+}
+
+/** The image as base64, or why it could not be read. */
+export function readImageBase64(
+  filePath: string,
+): { ok: true; base64: string } | { ok: false; reason: 'unreadable' | 'too_large' } {
+  try {
+    const st = fs.statSync(filePath);
+    if (!st.isFile()) return { ok: false, reason: 'unreadable' };
+    if (st.size > MAX_IMAGE_BYTES) return { ok: false, reason: 'too_large' };
+    return { ok: true, base64: fs.readFileSync(filePath).toString('base64') };
+  } catch {
+    return { ok: false, reason: 'unreadable' };
+  }
+}

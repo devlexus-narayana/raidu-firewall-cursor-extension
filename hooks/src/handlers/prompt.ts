@@ -9,6 +9,7 @@
  */
 
 import * as path from 'node:path';
+import { validateImageViaAPI } from '../lib/api';
 import { audit, incStat } from '../lib/audit';
 import {
   blockedConversation,
@@ -17,7 +18,7 @@ import {
   rememberBlockedValues,
   rememberSecretsIn,
 } from '../lib/blocked-values';
-import { readTextForScan } from '../lib/content';
+import { isImagePath, readImageBase64, readTextForScan } from '../lib/content';
 import { allow, denyPrompt, ids } from '../lib/helpers';
 import { classifySensitiveFile } from '../lib/policy';
 import {
@@ -35,6 +36,8 @@ import type { HookEvent, HookResponse } from '../lib/types';
 /** Attachments read per prompt, and bytes per attachment. */
 const MAX_ATTACHMENTS = 20;
 const MAX_ATTACHMENT_BYTES = 500_000;
+/** Images sent to Tower's image scan per prompt (each one is an OCR pass). */
+const MAX_IMAGES = 3;
 
 const NEW_CHAT_HINT = 'Start a new chat: this one now holds the blocked message, and further prompts here are blocked.';
 
@@ -76,6 +79,7 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
   //    same way reading it would be: attaching it sends its content.
   const files: ScanFile[] = [];
   const unscanned: string[] = [];
+  const images: Array<{ filePath: string; fileName: string }> = [];
   for (const a of attachments) {
     const filePath = a.file_path as string;
     const fileName = path.basename(filePath);
@@ -96,9 +100,46 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       markConversationBlocked(event.conversation_id, ['SENSITIVE_FILE']);
       return denyPrompt(`${fileName} is a protected file (policy: ${hit.rule}) and cannot be sent to the model.`);
     }
+    if (isImagePath(filePath)) {
+      images.push({ filePath, fileName });
+      continue;
+    }
     const read = readTextForScan(filePath, MAX_ATTACHMENT_BYTES);
     if (read.ok) files.push({ label: fileName, text: read.text });
     else if (read.reason === 'binary') unscanned.push(fileName);
+  }
+
+  // 1b. Images: the text scanners cannot read them. Tower's Presidio image
+  //     redactor finds text (emails, SSNs, keys) in screenshots and uploads,
+  //     and records the violation itself (RAI-4807 #10).
+  for (const [i, img] of images.entries()) {
+    const data = i < MAX_IMAGES ? readImageBase64(img.filePath) : null;
+    const verdict = data?.ok
+      ? validateImageViaAPI(data.base64, {
+          fileName: img.fileName,
+          ideConversationId: event.conversation_id,
+          ideGenerationId: event.generation_id,
+        })
+      : null;
+    if (!verdict) {
+      unscanned.push(img.fileName);
+      continue;
+    }
+    if (!verdict.passed) {
+      incStat('promptsBlocked');
+      markConversationBlocked(event.conversation_id, ['IMAGE_SENSITIVE_DATA']);
+      audit({
+        event: 'beforeSubmitPrompt',
+        action: 'blocked',
+        reason: 'sensitive_data_in_image',
+        attachments: [img.fileName],
+        ...ids(event),
+      });
+      // Tower already recorded the violation for this image; nothing to report.
+      return denyPrompt(
+        `Detected sensitive data in the image ${img.fileName}. Remove it or redact it before sending. ${NEW_CHAT_HINT}`,
+      );
+    }
   }
 
   // 2. Scan the prompt and the attached content together.
