@@ -254,7 +254,7 @@ export function postResponseScan(req: ResponseScanRequest): boolean {
  */
 export function validateImageViaAPI(
   base64: string,
-  meta: { fileName?: string; ideConversationId?: string; ideGenerationId?: string },
+  meta: { fileName?: string; ideConversationId?: string; ideGenerationId?: string; alreadySent?: boolean },
 ): { passed: boolean } | null {
   const token = getToken();
   if (!token) return null;
@@ -265,6 +265,7 @@ export function validateImageViaAPI(
     fileName: meta.fileName?.slice(0, 255),
     ideConversationId: meta.ideConversationId?.slice(0, 100),
     ideGenerationId: meta.ideGenerationId?.slice(0, 100),
+    alreadySent: meta.alreadySent || undefined,
   });
   const startMs = performance.now();
 

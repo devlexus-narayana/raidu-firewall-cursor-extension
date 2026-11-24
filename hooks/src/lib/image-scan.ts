@@ -4,16 +4,21 @@
  * The text scanners cannot read an image. Tower's /validate-image runs the
  * Presidio image redactor on it and records the violation itself.
  *
- * Where images show up: Cursor does NOT pass an uploaded or pasted chat image
- * to beforeSubmitPrompt. It saves it into the workspace as image-<uuid>.png
- * and the agent then opens it with the Read tool, so the same image reaches
- * preToolUse (Read) and beforeReadFile. Each of those, and prompt attachments,
- * calls scanImageFile.
+ * Where images show up: Cursor does NOT pass an image pasted or uploaded into
+ * chat to beforeSubmitPrompt (it gets the text only). Depending on the model,
+ * the image either goes to the model with the prompt, or the agent opens it
+ * with the Read tool. Either way Cursor saves a copy into the workspace
+ * (image-<uuid>.png, Screenshot_...-<uuid>.png):
+ * - a Read is checked before it happens (preToolUse, beforeReadFile) and blocked;
+ * - the saved copy is checked in the background (afterFileEdit). The model may
+ *   already have the image, so this records the violation (not enforced) and
+ *   blocks the rest of the chat, which would otherwise carry the image along.
  *
  * The verdict is cached per image content (SHA-256) for a few minutes, so the
  * two hooks of one read cost one OCR pass and write one Tower violation.
  */
 
+import { spawn } from 'node:child_process';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -63,7 +68,7 @@ function saveVerdict(hash: string, v: 'found' | 'clean'): void {
  */
 export function scanImageFile(
   filePath: string,
-  meta: { ideConversationId?: string; ideGenerationId?: string },
+  meta: { ideConversationId?: string; ideGenerationId?: string; alreadySent?: boolean },
 ): ImageVerdict {
   let data: Buffer;
   try {
@@ -124,4 +129,65 @@ export function blockImageRead(
   return deny(
     `Blocked reading the image ${path.basename(filePath)}: it contains sensitive data. Remove or redact it, and start a new chat.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// The copy Cursor saves of a chat image (afterFileEdit)
+// ---------------------------------------------------------------------------
+
+export const SCAN_SAVED_IMAGE_FLAG = '--scan-saved-image';
+
+interface SavedImageJob {
+  filePath: string;
+  conversationId?: string;
+  generationId?: string;
+}
+
+/**
+ * Scan a saved chat image without holding up the hook (afterFileEdit has a 5s
+ * timeout; OCR can take longer). Only the path goes to the child.
+ */
+export function scanSavedImageInBackground(job: SavedImageJob): void {
+  try {
+    const script = process.argv[1];
+    if (!script) return;
+    const child = spawn(process.execPath, [script, SCAN_SAVED_IMAGE_FLAG], {
+      detached: true,
+      stdio: ['pipe', 'ignore', 'ignore'],
+      windowsHide: true,
+    });
+    child.on('error', () => {});
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(JSON.stringify(job));
+    child.unref();
+  } catch (err) {
+    debug(`image scan: spawn failed: ${(err as Error).message?.slice(0, 100)}`);
+  }
+}
+
+/** Entry point of the detached child. */
+export async function runSavedImageScanFromStdin(): Promise<void> {
+  let input = '';
+  for await (const chunk of process.stdin) {
+    input += chunk;
+    if (input.length > 10_000) return;
+  }
+  const job = JSON.parse(input) as SavedImageJob;
+  const verdict = scanImageFile(job.filePath, {
+    ideConversationId: job.conversationId,
+    ideGenerationId: job.generationId,
+    alreadySent: true,
+  });
+  debug(`image scan: saved chat image ${verdict}`);
+  if (verdict !== 'found') return;
+  incStat('piiFound');
+  // The image is part of this chat now: every later prompt would carry it.
+  markConversationBlocked(job.conversationId, ['IMAGE_SENSITIVE_DATA']);
+  audit({
+    event: 'afterFileEdit',
+    action: 'image_sensitive_data_sent',
+    filePath: job.filePath,
+    conversationId: job.conversationId,
+    generationId: job.generationId,
+  });
 }

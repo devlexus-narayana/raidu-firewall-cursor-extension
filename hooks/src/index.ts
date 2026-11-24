@@ -19,6 +19,7 @@ import { handleStop } from './handlers/session';
 import { handleAfterShellExecution, handleBeforeShellExecution } from './handlers/shell';
 import { handlePreToolUse } from './handlers/tool-use';
 import { debug } from './lib/audit';
+import { runSavedImageScanFromStdin, SCAN_SAVED_IMAGE_FLAG } from './lib/image-scan';
 import { FLUSH_FLAG, flushReports, flushReportsInBackground } from './lib/report';
 import { runResponseScanFromStdin, SCAN_RESPONSE_FLAG } from './lib/response-scan';
 import type { HookEvent, HookResponse } from './lib/types';
@@ -114,6 +115,11 @@ if (process.argv.includes(FLUSH_FLAG)) {
   } catch (err: unknown) {
     debug(`ERR flush: ${(err as Error).message?.slice(0, 100)}`);
   }
+} else if (process.argv.includes(SCAN_SAVED_IMAGE_FLAG)) {
+  // Detached scan of a chat image Cursor saved, started by afterFileEdit.
+  runSavedImageScanFromStdin().catch((err: unknown) =>
+    debug(`ERR image-scan: ${(err as Error).message?.slice(0, 100)}`),
+  );
 } else if (process.argv.includes(SCAN_RESPONSE_FLAG)) {
   // Detached response scanner started by scanResponseInBackground().
   runResponseScanFromStdin().catch((err: unknown) =>

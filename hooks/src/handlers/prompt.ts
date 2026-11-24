@@ -71,7 +71,9 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       rule: 'conversation_holds_blocked_prompt',
     });
     return denyPrompt(
-      'This chat still contains a message Raidu Firewall blocked, and Cursor would send it to the model again with this prompt. Start a new chat to continue.',
+      heldTypes.includes('IMAGE_SENSITIVE_DATA')
+        ? 'This chat contains an image with sensitive data, and Cursor would send it to the model again with this prompt. Start a new chat to continue.'
+        : 'This chat still contains a message Raidu Firewall blocked, and Cursor would send it to the model again with this prompt. Start a new chat to continue.',
     );
   }
 
