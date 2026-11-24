@@ -22,6 +22,8 @@ import type { BlockReport, EvidenceVerdict } from './types';
 export const API_BASE = process.env.RAIDU_API_BASE || 'https://sandbox.raidu.com';
 const TOKEN_FILE = path.join(os.homedir(), '.raidu', 'token');
 const MAX_API_INPUT = 100_000;
+/** Tower's IdeValidateResponseDto cap. */
+const MAX_RESPONSE_INPUT = 200_000;
 
 // ---------------------------------------------------------------------------
 // Token reader (secure file, not settings.json)
@@ -82,7 +84,7 @@ export interface APIValidationResult {
   evidence?: EvidenceVerdict;
 }
 
-export function validateViaAPI(input: string): APIValidationResult | null {
+export function validateViaAPI(input: string, fileContent?: string[]): APIValidationResult | null {
   const token = getToken();
   if (!token) {
     debug('API: no token, skipping');
@@ -92,7 +94,17 @@ export function validateViaAPI(input: string): APIValidationResult | null {
   const safeInput = input.slice(0, MAX_API_INPUT);
   const envId = readSetting('raidu.environmentId');
 
-  const body = JSON.stringify({ input: safeInput });
+  // Tower scans input + fileContent together (joined by '\n'); keep the
+  // combined size within the same cap as a prompt alone.
+  let budget = MAX_API_INPUT - safeInput.length;
+  const files: string[] = [];
+  for (const f of fileContent ?? []) {
+    if (budget <= 1) break;
+    const part = f.slice(0, budget - 1);
+    files.push(part);
+    budget -= part.length + 1;
+  }
+  const body = JSON.stringify(files.length > 0 ? { input: safeInput, fileContent: files } : { input: safeInput });
   const url = `${API_BASE}/api/guardrails/ide/validate`;
   const startMs = performance.now();
 
@@ -109,11 +121,12 @@ export function validateViaAPI(input: string): APIValidationResult | null {
         `Authorization: Bearer ${token}`,
         '-H',
         'Content-Type: application/json',
-        '-d',
-        body,
+        '--data-binary',
+        '@-',
         url,
       ],
-      { timeout: 8000, encoding: 'utf-8' as BufferEncoding, stdio: ['pipe', 'pipe', 'pipe'] },
+      // Body over stdin, not argv: keeps prompt and file content out of the process list.
+      { input: body, timeout: 8000, encoding: 'utf-8' as BufferEncoding, stdio: ['pipe', 'pipe', 'pipe'] },
     );
 
     const latencyMs = (performance.now() - startMs).toFixed(0);
@@ -122,7 +135,6 @@ export function validateViaAPI(input: string): APIValidationResult | null {
     debug(
       `API: ${latencyMs}ms | passed=${parsed.passed} | entities=${parsed.entities?.length || 0} | sanitized=${!!parsed.sanitizedInput} | serverMs=${parsed.processingTimeMs || '?'}`,
     );
-    debug(`API: response=${JSON.stringify(parsed)}`);
 
     return parsed;
   } catch (err: unknown) {
@@ -171,5 +183,61 @@ export function postBlockReports(reports: BlockReport[]): EvidenceVerdict[] | nu
   } catch (err: unknown) {
     debug(`API: report FAILED | ${(err as Error).message?.slice(0, 150)}`);
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Response scan (called from the detached response scanner, never from a hook)
+// ---------------------------------------------------------------------------
+
+export interface ResponseScanRequest {
+  response: string;
+  prompt?: string;
+  ideConversationId?: string;
+  ideGenerationId?: string;
+}
+
+/**
+ * POST a model reply to /api/guardrails/ide/validate-response. Tower scans it
+ * against the configured security policies and records the violation itself.
+ * Returns false on any failure.
+ */
+export function postResponseScan(req: ResponseScanRequest): boolean {
+  const token = getToken();
+  if (!token || !req.response) return false;
+
+  const url = `${API_BASE}/api/guardrails/ide/validate-response`;
+  const body = JSON.stringify({
+    response: req.response.slice(0, MAX_RESPONSE_INPUT),
+    prompt: req.prompt?.slice(0, MAX_RESPONSE_INPUT),
+    ideConversationId: req.ideConversationId?.slice(0, 100),
+    ideGenerationId: req.ideGenerationId?.slice(0, 100),
+  });
+
+  try {
+    const result = execFileSync(
+      'curl',
+      [
+        '-fsSL',
+        '-X',
+        'POST',
+        '-H',
+        `Authorization: Bearer ${token}`,
+        '-H',
+        'Content-Type: application/json',
+        '--data-binary',
+        '@-',
+        url,
+      ],
+      { input: body, timeout: 30000, encoding: 'utf-8' as BufferEncoding, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    const parsed = JSON.parse(result as string) as { passed?: boolean; action?: string; violations?: unknown[] };
+    debug(
+      `API: response scan passed=${parsed.passed} action=${parsed.action} violations=${parsed.violations?.length ?? 0}`,
+    );
+    return true;
+  } catch (err: unknown) {
+    debug(`API: response scan FAILED | ${(err as Error).message?.slice(0, 150)}`);
+    return false;
   }
 }

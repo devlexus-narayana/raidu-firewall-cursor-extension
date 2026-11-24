@@ -14,6 +14,8 @@ export interface HookEvent {
 
   // beforeSubmitPrompt
   prompt?: string;
+  /** Files and rules attached to the prompt (@-mentions, pasted code references, uploads). */
+  attachments?: HookAttachment[];
 
   // preToolUse
   tool_name?: string;
@@ -44,6 +46,17 @@ export interface HookEvent {
 
   // Environment ID for API calls
   environmentId?: string;
+
+  /** Workspace root folders (every hook). */
+  workspace_roots?: string[];
+  /** Working directory of a tool call (preToolUse). */
+  cwd?: string;
+}
+
+export interface HookAttachment {
+  type?: 'file' | 'rule' | string;
+  /** Absolute path. */
+  file_path?: string;
 }
 
 export interface ToolInput {

@@ -3,6 +3,7 @@
  */
 
 import { audit, incStat } from '../lib/audit';
+import { findBlockedValues, rememberBlockedValues } from '../lib/blocked-values';
 import { allow, deny, ids } from '../lib/helpers';
 import { entitySummary, formatEntities, scanText, scanTextLocal } from '../lib/redaction';
 import { reportBlock, reportScanBlockIfUnrecorded } from '../lib/report';
@@ -20,6 +21,26 @@ const EXFIL_PATTERNS: RegExp[] = [/curl\s+.*(-d|--data)/i, /wget\s+.*--post/i, /
 
 export function handleBeforeShellExecution(event: HookEvent): HookResponse {
   const cmd = event.command || '';
+  const reused = findBlockedValues(cmd);
+  if (reused.length > 0) {
+    incStat('commandsBlocked');
+    audit({
+      event: 'beforeShellExecution',
+      action: 'blocked',
+      reason: 'previously_blocked_value',
+      entities: reused.map((type) => ({ type, score: 1 })),
+      ...ids(event),
+    });
+    reportBlock(event, {
+      event: 'beforeShellExecution',
+      kind: 'sensitive_data',
+      detector: 'local',
+      tool: 'Shell',
+      entityTypes: reused,
+      rule: 'previously_blocked_value',
+    });
+    return deny(`Blocked command. It uses a value Raidu Firewall blocked earlier (${reused.join(', ')}).`);
+  }
   const scan = scanText(cmd);
   const { entities } = scan;
   if (entities.length > 0) {
@@ -31,6 +52,7 @@ export function handleBeforeShellExecution(event: HookEvent): HookResponse {
       entities: entitySummary(entities),
       ...ids(event),
     });
+    rememberBlockedValues(entities);
     reportScanBlockIfUnrecorded(event, scan, { event: 'beforeShellExecution', tool: 'Shell' });
     return deny(`Blocked command. Contains ${formatEntities(entities)}.`);
   }
