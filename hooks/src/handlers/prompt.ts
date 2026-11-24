@@ -10,7 +10,13 @@
 
 import * as path from 'node:path';
 import { audit, incStat } from '../lib/audit';
-import { findBlockedValues, rememberBlockedValues, rememberSecretsIn } from '../lib/blocked-values';
+import {
+  blockedConversation,
+  findBlockedValues,
+  markConversationBlocked,
+  rememberBlockedValues,
+  rememberSecretsIn,
+} from '../lib/blocked-values';
 import { readTextForScan } from '../lib/content';
 import { allow, denyPrompt, ids } from '../lib/helpers';
 import { classifySensitiveFile } from '../lib/policy';
@@ -20,6 +26,7 @@ import {
   formatEntities,
   redactText,
   type ScanFile,
+  scanTextLocal,
   scanTextWithFiles,
 } from '../lib/redaction';
 import { reportBlock, reportScanBlockIfUnrecorded } from '../lib/report';
@@ -29,7 +36,7 @@ import type { HookEvent, HookResponse } from '../lib/types';
 const MAX_ATTACHMENTS = 20;
 const MAX_ATTACHMENT_BYTES = 500_000;
 
-const NEW_CHAT_HINT = 'Start a new chat so the blocked value is not reused from this conversation.';
+const NEW_CHAT_HINT = 'Start a new chat: this one now holds the blocked message, and further prompts here are blocked.';
 
 export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
   const prompt = event.prompt || '';
@@ -38,6 +45,32 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
     .slice(0, MAX_ATTACHMENTS);
   if (!prompt && attachments.length === 0) return allow();
   incStat('totalScans');
+
+  // 0. Cursor keeps a blocked prompt in the chat and sends it as history with
+  //    every later prompt, so the model still sees the blocked data. A hook
+  //    cannot edit that history: block the conversation until a new chat.
+  const heldTypes = blockedConversation(event.conversation_id);
+  if (heldTypes) {
+    incStat('promptsBlocked');
+    // Not sent anywhere, but remember what it carries so the values stay blocked.
+    rememberBlockedValues(scanTextLocal(prompt).entities);
+    audit({
+      event: 'beforeSubmitPrompt',
+      action: 'blocked',
+      reason: 'conversation_holds_blocked_prompt',
+      ...ids(event),
+    });
+    reportBlock(event, {
+      event: 'beforeSubmitPrompt',
+      kind: 'sensitive_data',
+      detector: 'local',
+      entityTypes: heldTypes,
+      rule: 'conversation_holds_blocked_prompt',
+    });
+    return denyPrompt(
+      'This chat still contains a message Raidu Firewall blocked, and Cursor would send it to the model again with this prompt. Start a new chat to continue.',
+    );
+  }
 
   // 1. An attached file that is sensitive by name (.env, keys) is blocked the
   //    same way reading it would be: attaching it sends its content.
@@ -60,6 +93,7 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       // Remember what is in it, so the agent cannot pull it in another way.
       const read = readTextForScan(filePath, MAX_ATTACHMENT_BYTES);
       if (read.ok) rememberSecretsIn(read.text);
+      markConversationBlocked(event.conversation_id, ['SENSITIVE_FILE']);
       return denyPrompt(`${fileName} is a protected file (policy: ${hit.rule}) and cannot be sent to the model.`);
     }
     const read = readTextForScan(filePath, MAX_ATTACHMENT_BYTES);
@@ -74,6 +108,10 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
     incStat('piiFound', result.entities.length);
     incStat('promptsBlocked');
     rememberBlockedValues(result.entities);
+    markConversationBlocked(
+      event.conversation_id,
+      result.entities.map((e) => e.type),
+    );
 
     const attachmentsHit = result.foundIn.filter((f) => f !== 'prompt');
     const promptHit = result.foundIn.includes('prompt');
@@ -109,6 +147,7 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
   const reused = findBlockedValues([prompt, ...files.map((f) => f.text)].join('\n'));
   if (reused.length > 0) {
     incStat('promptsBlocked');
+    markConversationBlocked(event.conversation_id, reused);
     audit({
       event: 'beforeSubmitPrompt',
       action: 'blocked',
