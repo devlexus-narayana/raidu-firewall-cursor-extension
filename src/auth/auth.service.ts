@@ -12,6 +12,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import * as settings from '../config/settings';
+import { revokeOnServer } from './revoke';
 
 // ---------------------------------------------------------------------------
 // State
@@ -182,25 +183,8 @@ export async function logout(): Promise<void> {
   const token = await settings.getToken();
   const apiBase = settings.getApiBase();
 
-  if (token) {
-    try {
-      // Get sessions and revoke
-      const sessionsRes = await fetch(`${apiBase}/api/auth/ide/sessions`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (sessionsRes.ok) {
-        const sessions = (await sessionsRes.json()) as Array<{ id: string }>;
-        for (const session of sessions) {
-          await fetch(`${apiBase}/api/auth/ide/revoke?session_id=${session.id}`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
-          });
-        }
-      }
-    } catch {
-      // Best effort
-    }
-  }
+  // Revoke on Tower too, so the pairing stops counting as connected there.
+  if (token) await revokeOnServer(apiBase, token, 'cursor');
 
   await settings.clearAll();
   _profile = undefined;
