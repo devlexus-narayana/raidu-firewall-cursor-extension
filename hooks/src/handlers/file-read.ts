@@ -10,7 +10,9 @@
 
 import * as path from 'node:path';
 import { audit, incStat } from '../lib/audit';
+import { isImagePath } from '../lib/content';
 import { allow, deny, ids } from '../lib/helpers';
+import { blockImageRead } from '../lib/image-scan';
 import { inspectFile } from '../lib/inspect';
 import { classifySensitiveFile } from '../lib/policy';
 import { entitySummary, formatEntities } from '../lib/redaction';
@@ -32,6 +34,11 @@ export function handleBeforeReadFile(event: HookEvent): HookResponse {
       fileName: path.basename(filePath),
     });
     return deny(`Blocked reading ${path.basename(filePath)} (policy: ${hit.rule}).`);
+  }
+
+  if (isImagePath(filePath)) {
+    const blocked = blockImageRead(event, 'beforeReadFile', filePath);
+    if (blocked) return blocked;
   }
 
   if (hit?.mode === 'inspect') {

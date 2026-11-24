@@ -12,7 +12,9 @@
 
 import { audit, incStat } from '../lib/audit';
 import { findBlockedValues, rememberBlockedValues } from '../lib/blocked-values';
+import { isImagePath } from '../lib/content';
 import { allow, deny, ids } from '../lib/helpers';
+import { blockImageRead, resolveToolPath } from '../lib/image-scan';
 import { inspectFile } from '../lib/inspect';
 import { type FileToInspect, findSensitiveToolAccess } from '../lib/policy';
 import { entitySummary, formatEntities, scanText } from '../lib/redaction';
@@ -65,6 +67,18 @@ export function handlePreToolUse(event: HookEvent): HookResponse {
       fileName: hit.fileName,
     });
     return deny(hit.message);
+  }
+
+  // An image the agent is about to open (Cursor saves chat images to the
+  // workspace and the agent reads them with the Read tool).
+  // Only tools that READ the file (Read): a Write of the image is Cursor saving it.
+  if (/^read/i.test(tool) && typeof input.file_path === 'string' && isImagePath(input.file_path)) {
+    const blocked = blockImageRead(
+      event,
+      'preToolUse',
+      resolveToolPath(input.file_path, event.cwd, event.workspace_roots),
+    );
+    if (blocked) return blocked;
   }
 
   for (const f of toInspect.slice(0, 5)) {

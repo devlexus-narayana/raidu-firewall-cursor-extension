@@ -82,9 +82,10 @@ function installUserHooks(hookBinary: string): void {
     // Remove existing Raidu hooks
     config.hooks[event] = config.hooks[event].filter((h) => !h[RAIDU_MARKER] && !h.command.includes('raidu'));
 
-    // beforeSubmitPrompt may send attached images to Tower's image scan (OCR),
-    // which takes longer than a text scan.
-    const timeout = event === 'stop' ? 60 : event === 'beforeSubmitPrompt' ? 30 : event.startsWith('after') ? 5 : 10;
+    // These may send an image to Tower's image scan (OCR), which takes longer
+    // than a text scan: prompt attachments, and the agent opening a chat image.
+    const IMAGE_SCAN_EVENTS = ['beforeSubmitPrompt', 'preToolUse', 'beforeReadFile'];
+    const timeout = event === 'stop' ? 60 : IMAGE_SCAN_EVENTS.includes(event) ? 30 : event.startsWith('after') ? 5 : 10;
     config.hooks[event].push({ command, timeout, [RAIDU_MARKER]: true });
   }
 

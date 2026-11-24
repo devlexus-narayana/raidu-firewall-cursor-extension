@@ -9,7 +9,6 @@
  */
 
 import * as path from 'node:path';
-import { validateImageViaAPI } from '../lib/api';
 import { audit, incStat } from '../lib/audit';
 import {
   blockedConversation,
@@ -18,8 +17,9 @@ import {
   rememberBlockedValues,
   rememberSecretsIn,
 } from '../lib/blocked-values';
-import { isImagePath, readImageBase64, readTextForScan } from '../lib/content';
+import { isImagePath, readTextForScan } from '../lib/content';
 import { allow, denyPrompt, ids } from '../lib/helpers';
+import { scanImageFile } from '../lib/image-scan';
 import { classifySensitiveFile } from '../lib/policy';
 import {
   copyToClipboard,
@@ -113,19 +113,18 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
   //     redactor finds text (emails, SSNs, keys) in screenshots and uploads,
   //     and records the violation itself (RAI-4807 #10).
   for (const [i, img] of images.entries()) {
-    const data = i < MAX_IMAGES ? readImageBase64(img.filePath) : null;
-    const verdict = data?.ok
-      ? validateImageViaAPI(data.base64, {
-          fileName: img.fileName,
-          ideConversationId: event.conversation_id,
-          ideGenerationId: event.generation_id,
-        })
-      : null;
-    if (!verdict) {
+    const verdict =
+      i < MAX_IMAGES
+        ? scanImageFile(img.filePath, {
+            ideConversationId: event.conversation_id,
+            ideGenerationId: event.generation_id,
+          })
+        : 'unscanned';
+    if (verdict === 'unscanned') {
       unscanned.push(img.fileName);
       continue;
     }
-    if (!verdict.passed) {
+    if (verdict === 'found') {
       incStat('promptsBlocked');
       markConversationBlocked(event.conversation_id, ['IMAGE_SENSITIVE_DATA']);
       audit({
