@@ -8,15 +8,16 @@
  */
 
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { LOG_DIR } from './paths';
 import type { AuditEntry, Stats } from './types';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-export const LOG_DIR = path.join(os.homedir(), '.raidu', 'logs');
+// Cursor's own log directory (~/.raidu/cursor/logs), never shared with another editor.
+export { LOG_DIR };
 export const AUDIT_LOG = path.join(LOG_DIR, 'audit.jsonl');
 export const STATS_FILE = path.join(LOG_DIR, 'stats.json');
 export const DEBUG_LOG = path.join(LOG_DIR, 'debug.log');

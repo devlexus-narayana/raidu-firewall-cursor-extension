@@ -13,19 +13,33 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { debug } from './audit';
+import { LEGACY_TOKEN_FILE, TOKEN_FILE, TOOL, TOWER_FILE } from './paths';
 import type { BlockReport, EvidenceVerdict } from './types';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-export const API_BASE = process.env.RAIDU_API_BASE || 'https://sandbox.raidu.com';
-// This editor's own token (src/config/token-store.ts writes the same path).
-// RAI-4807: one file per editor; the old shared ~/.raidu/token let Cursor's
-// hooks send Windsurf's token, and the other way round.
-const TOOL = 'cursor';
-const TOKEN_FILE = path.join(os.homedir(), '.raidu', TOOL, 'token');
-const LEGACY_TOKEN_FILE = path.join(os.homedir(), '.raidu', 'token');
+const DEFAULT_API_BASE = 'https://sandbox.raidu.com';
+
+/**
+ * The Tower to call: RAIDU_API_BASE, else the Tower the extension is
+ * connected to (its raidu.apiBase setting, written to ~/.raidu/cursor/tower),
+ * else the default. Before, the hooks ignored the setting, so with any Tower
+ * but the default the extension paired with one Tower while every scan went to
+ * another, and the pairing never showed as used.
+ */
+function resolveApiBase(): string {
+  const fromEnv = process.env.RAIDU_API_BASE;
+  if (fromEnv) return fromEnv;
+  try {
+    const fromExtension = fs.readFileSync(TOWER_FILE, 'utf-8').trim();
+    if (/^https?:\/\//.test(fromExtension)) return fromExtension.replace(/\/+$/, '');
+  } catch {}
+  return DEFAULT_API_BASE;
+}
+
+export const API_BASE = resolveApiBase();
 const MAX_API_INPUT = 100_000;
 /** Tower's IdeValidateResponseDto cap. */
 const MAX_RESPONSE_INPUT = 200_000;
