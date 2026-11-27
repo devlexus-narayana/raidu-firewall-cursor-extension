@@ -9,11 +9,11 @@
  */
 
 import * as path from 'node:path';
-import { audit, incStat } from '../lib/audit';
+import { audit, debug, incStat } from '../lib/audit';
 import {
   blockedConversation,
-  findBlockedValues,
   markConversationBlocked,
+  matchBlockedValues,
   rememberBlockedValues,
   rememberSecretsIn,
 } from '../lib/blocked-values';
@@ -39,7 +39,11 @@ const MAX_ATTACHMENT_BYTES = 500_000;
 /** Images sent to Tower's image scan per prompt (each one is an OCR pass). */
 const MAX_IMAGES = 3;
 
-const NEW_CHAT_HINT = 'Start a new chat: this one now holds the blocked message, and further prompts here are blocked.';
+const NEW_CHAT_HINT =
+  'Edit that message to take the sensitive data out, or start a new chat: until then further prompts in this chat are blocked.';
+/** A blocked file or image cannot be seen leaving the chat, so only a new chat clears it. */
+const NEW_CHAT_ONLY_HINT =
+  'Start a new chat: this one now holds the blocked content, and further prompts here are blocked.';
 
 export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
   const prompt = event.prompt || '';
@@ -49,10 +53,19 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
   if (!prompt && attachments.length === 0) return allow();
   incStat('totalScans');
 
+  // TEMP RAI-4807 probe: which fields Cursor sends with a prompt (names only).
+  debug(`beforeSubmitPrompt payload keys: ${Object.keys(event).sort().join(',')}`);
+
   // 0. Cursor keeps a blocked prompt in the chat and sends it as history with
   //    every later prompt, so the model still sees the blocked data. A hook
-  //    cannot edit that history: block the conversation until a new chat.
-  const heldTypes = blockedConversation(event.conversation_id);
+  //    cannot edit that history: block the conversation while the blocked
+  //    message is still in it (read from the transcript when Cursor gives one).
+  const held = blockedConversation(event.conversation_id, event.transcript_path);
+  if (held.check) debug(`conversation held check: ${held.check}`);
+  if (held.check === 'cleared') {
+    audit({ event: 'beforeSubmitPrompt', action: 'unblocked', reason: 'blocked_message_removed', ...ids(event) });
+  }
+  const heldTypes = held.types;
   if (heldTypes) {
     incStat('promptsBlocked');
     // Not sent anywhere, but remember what it carries so the values stay blocked.
@@ -61,6 +74,7 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       event: 'beforeSubmitPrompt',
       action: 'blocked',
       reason: 'conversation_holds_blocked_prompt',
+      check: held.check,
       ...ids(event),
     });
     reportBlock(event, {
@@ -70,10 +84,15 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       entityTypes: heldTypes,
       rule: 'conversation_holds_blocked_prompt',
     });
+    if (heldTypes.includes('IMAGE_SENSITIVE_DATA')) {
+      return denyPrompt(
+        'This chat contains an image with sensitive data, and Cursor would send it to the model again with this prompt. Start a new chat to continue.',
+      );
+    }
     return denyPrompt(
-      heldTypes.includes('IMAGE_SENSITIVE_DATA')
-        ? 'This chat contains an image with sensitive data, and Cursor would send it to the model again with this prompt. Start a new chat to continue.'
-        : 'This chat still contains a message Raidu Firewall blocked, and Cursor would send it to the model again with this prompt. Start a new chat to continue.',
+      held.check === 'not_values'
+        ? 'This chat still contains content Raidu Firewall blocked, and Cursor would send it to the model again with this prompt. Start a new chat to continue.'
+        : 'This chat still contains a message Raidu Firewall blocked, and Cursor would send it to the model again with this prompt. Edit that message to take the sensitive data out, or start a new chat.',
     );
   }
 
@@ -100,7 +119,9 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       const read = readTextForScan(filePath, MAX_ATTACHMENT_BYTES);
       if (read.ok) rememberSecretsIn(read.text);
       markConversationBlocked(event.conversation_id, ['SENSITIVE_FILE']);
-      return denyPrompt(`${fileName} is a protected file (policy: ${hit.rule}) and cannot be sent to the model.`);
+      return denyPrompt(
+        `${fileName} is a protected file (policy: ${hit.rule}) and cannot be sent to the model. ${NEW_CHAT_ONLY_HINT}`,
+      );
     }
     if (isImagePath(filePath)) {
       images.push({ filePath, fileName });
@@ -138,7 +159,7 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       });
       // Tower already recorded the violation for this image; nothing to report.
       return denyPrompt(
-        `Detected sensitive data in the image ${img.fileName}. Remove it or redact it before sending. ${NEW_CHAT_HINT}`,
+        `Detected sensitive data in the image ${img.fileName}. Remove it or redact it before sending. ${NEW_CHAT_ONLY_HINT}`,
       );
     }
   }
@@ -150,13 +171,16 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
     incStat('piiFound', result.entities.length);
     incStat('promptsBlocked');
     rememberBlockedValues(result.entities);
-    markConversationBlocked(
-      event.conversation_id,
-      result.entities.map((e) => e.type),
-    );
 
     const attachmentsHit = result.foundIn.filter((f) => f !== 'prompt');
     const promptHit = result.foundIn.includes('prompt');
+    // Values are passed only when the prompt text alone was blocked: an attached
+    // file's content may not show in the transcript, so its absence proves nothing.
+    markConversationBlocked(
+      event.conversation_id,
+      result.entities.map((e) => e.type),
+      attachmentsHit.length === 0 ? result.entities.map((e) => e.value) : undefined,
+    );
 
     // Only the prompt goes to the clipboard, never attached file content.
     let clipboardNote = '';
@@ -182,14 +206,22 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
 
     const where =
       attachmentsHit.length > 0 ? `${promptHit ? 'your prompt and ' : ''}${attachmentsHit.join(', ')}` : 'your prompt';
-    return denyPrompt(`Detected ${formatEntities(result.entities)} in ${where}.${clipboardNote} ${NEW_CHAT_HINT}`);
+    return denyPrompt(
+      `Detected ${formatEntities(result.entities)} in ${where}.${clipboardNote} ${attachmentsHit.length === 0 ? NEW_CHAT_HINT : NEW_CHAT_ONLY_HINT}`,
+    );
   }
 
   // 3. A value blocked earlier must not come back in a later prompt either.
-  const reused = findBlockedValues([prompt, ...files.map((f) => f.text)].join('\n'));
+  const promptReused = matchBlockedValues(prompt);
+  const fileReused = files.length > 0 ? matchBlockedValues(files.map((f) => f.text).join('\n')) : [];
+  const reused = [...new Set([...promptReused, ...fileReused].map((m) => m.type))];
   if (reused.length > 0) {
     incStat('promptsBlocked');
-    markConversationBlocked(event.conversation_id, reused);
+    markConversationBlocked(
+      event.conversation_id,
+      reused,
+      fileReused.length === 0 ? promptReused.map((m) => m.value) : undefined,
+    );
     audit({
       event: 'beforeSubmitPrompt',
       action: 'blocked',
@@ -205,7 +237,7 @@ export function handleBeforeSubmitPrompt(event: HookEvent): HookResponse {
       rule: 'previously_blocked_value',
     });
     return denyPrompt(
-      `This prompt contains a value Raidu Firewall blocked earlier (${reused.join(', ')}). ${NEW_CHAT_HINT}`,
+      `This prompt contains a value Raidu Firewall blocked earlier (${reused.join(', ')}). ${fileReused.length === 0 ? NEW_CHAT_HINT : NEW_CHAT_ONLY_HINT}`,
     );
   }
 

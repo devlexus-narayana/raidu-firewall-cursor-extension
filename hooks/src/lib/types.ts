@@ -11,6 +11,8 @@ export interface HookEvent {
   hook_event_name: string;
   conversation_id?: string;
   generation_id?: string;
+  /** Path to the conversation transcript, when Cursor sends one. */
+  transcript_path?: string | null;
 
   // beforeSubmitPrompt
   prompt?: string;
